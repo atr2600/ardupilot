@@ -126,12 +126,12 @@ class AutoTestCopter(AutoTest):
                 takeoff_throttle=1700,
                 require_absolute=True,
                 mode="STABILIZE",
-                timeout=30):
+                timeout=120):
         """Takeoff get to 30m altitude."""
         self.progress("TAKEOFF")
         self.change_mode(mode)
         if not self.armed():
-            self.wait_ready_to_arm(require_absolute=require_absolute)
+            self.wait_ready_to_arm(require_absolute=require_absolute, timeout=timeout)
             self.zero_throttle()
             self.arm_vehicle()
         self.set_rc(3, takeoff_throttle)
@@ -2264,9 +2264,9 @@ class AutoTestCopter(AutoTest):
             self.set_parameter("EK3_SRC2_YAW", 6)   # External Nav
             self.set_parameter("RC7_OPTION", 80)    # RC aux switch 7 set to Viso Align
             self.set_parameter("RC8_OPTION", 90)    # RC aux switch 8 set to EKF source selector
-            self.reboot_sitl()
             self.set_parameter("EK2_ENABLE", 0)
             self.set_parameter("AHRS_EKF_TYPE", 3)
+            self.reboot_sitl()
 
             # switch to use GPS
             self.set_rc(8, 1000)
@@ -2283,7 +2283,7 @@ class AutoTestCopter(AutoTest):
 
             # takeoff to 10m in Loiter
             self.progress("Moving to ensure location is tracked")
-            self.takeoff(10, mode="LOITER", require_absolute=True)
+            self.takeoff(10, mode="LOITER", require_absolute=True, timeout=720)
 
             # fly forward in Loiter
             self.set_rc(2, 1300)
@@ -4351,6 +4351,10 @@ class AutoTestCopter(AutoTest):
 
         self.context_pop()
 
+        # need a final reboot because weird things happen to your
+        # vehicle state when switching back from EKF type 10!
+        self.reboot_sitl()
+
         if ex is not None:
             raise ex
 
@@ -4832,7 +4836,7 @@ class AutoTestCopter(AutoTest):
                                          0,
                                          0)
             self.reach_heading_manual(0);
-            self.wait_location(north_loc, accuracy=6)
+            self.wait_location(north_loc, accuracy=6, timeout=200)
             self.reach_heading_manual(90);
             east_loc = mavutil.location(-35.363013,
                                         149.165194,

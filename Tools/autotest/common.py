@@ -1529,14 +1529,26 @@ class AutoTest(ABC):
         if required_bootcount is None:
             required_bootcount = old_bootcount + 1
         while True:
+            # get_parameter calls get_sim_time.... streamrates may
+            # be zero so we need to prompt for one of these...
+            self.send_cmd(mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE,
+                          mavutil.mavlink.MAVLINK_MSG_ID_SYSTEM_TIME,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0,
+                          0)
             if time.time() - tstart > timeout:
                 raise AutoTestTimeoutException("Did not detect reboot")
             try:
-                current_bootcount = self.get_parameter('STAT_BOOTCNT', timeout=1, attempts=3)
+                current_bootcount = self.get_parameter('STAT_BOOTCNT', timeout=1, attempts=1)
                 self.progress("current=%s required=%u" % (str(current_bootcount), required_bootcount))
                 if current_bootcount == required_bootcount:
                     break
             except NotAchievedException:
+                pass
+            except AutoTestTimeoutException:
                 pass
 
         # empty mav to avoid getting old timestamps:
@@ -1705,17 +1717,14 @@ class AutoTest(ABC):
                 continue
             if state == state_outside:
                 if ("#define LOG_BASE_STRUCTURES" in line or
-                    "#define LOG_STRUCTURE_FROM_DAL" in line or
-                    "#define LOG_STRUCTURE_FROM_NAVEKF2" in line or
-                    "#define LOG_STRUCTURE_FROM_NAVEKF3" in line):
+                    re.match("#define LOG_STRUCTURE_FROM_.*", line)):
 #                    self.progress("Moving inside")
                     state = state_inside
                 continue
             if state == state_inside:
                 if linestate == linestate_none:
                     allowed_list = ['LOG_SBP_STRUCTURES',
-                                    'LOG_STRUCTURE_FROM_DAL',
-                                    'LOG_STRUCTURE_FROM_NAVEKF']
+                                    'LOG_STRUCTURE_FROM_']
 
                     allowed = False
                     for a in allowed_list:
@@ -3168,11 +3177,13 @@ class AutoTest(ABC):
             0)
 
     def set_analog_rangefinder_parameters(self):
-        self.set_parameter("RNGFND1_TYPE", 1)
-        self.set_parameter("RNGFND1_MIN_CM", 0)
-        self.set_parameter("RNGFND1_MAX_CM", 4000)
-        self.set_parameter("RNGFND1_SCALING", 12.12)
-        self.set_parameter("RNGFND1_PIN", 0)
+        self.set_parameters({
+            "RNGFND1_TYPE": 1,
+            "RNGFND1_MIN_CM": 0,
+            "RNGFND1_MAX_CM": 4000,
+            "RNGFND1_SCALING": 12.12,
+            "RNGFND1_PIN": 0,
+        })
 
     def send_debug_trap(self, timeout=6000):
         self.progress("Sending trap to autopilot")
@@ -3532,7 +3543,7 @@ class AutoTest(ABC):
             # we MUST parse here or collections fail where we need
             # them to work!
             self.drain_mav(quiet=True)
-            tstart = self.get_sim_time()
+            tstart = self.get_sim_time(timeout=timeout)
             encname = name
             if sys.version_info.major >= 3 and type(encname) != bytes:
                 encname = bytes(encname, 'ascii')
@@ -4582,7 +4593,7 @@ class AutoTest(ABC):
             if m is None:
                 raise NotAchievedException("Did not receive a home position")
         if check_prearm_bit:
-            self.wait_prearm_sys_status_healthy()
+            self.wait_prearm_sys_status_healthy(timeout=timeout)
         self.progress("Took %u seconds to become armable" % armable_time)
         self.total_waiting_to_arm_time += armable_time
         self.waiting_to_arm_count += 1
@@ -5149,7 +5160,7 @@ Also, ignores heartbeats not from our target system'''
         mavutil.dump_message_verbose(f, m)
         return f.getvalue()
 
-    def poll_home_position(self, quiet=False, timeout=30):
+    def poll_home_position(self, quiet=True, timeout=30):
         old = self.mav.messages.get("HOME_POSITION", None)
         tstart = self.get_sim_time()
         while True:
@@ -5177,6 +5188,7 @@ Also, ignores heartbeats not from our target system'''
                 break
             if m._timestamp != old._timestamp:
                 break
+        self.progress("Polled home position (%s)" % str(m))
         return m
 
     def distance_to_home(self, use_cached_home=False):
@@ -5336,6 +5348,11 @@ Also, ignores heartbeats not from our target system'''
             self.disarm_vehicle(force=True)
         self.reboot_sitl()
 
+    def set_parameters(self, parameters):
+        '''set parameters from the supplied dict'''
+        for (name, value) in parameters.items():
+            self.set_parameter(name, value)
+
     def zero_mag_offset_parameters(self, compass_count=3):
         self.progress("Zeroing Mag OFS parameters")
         self.drain_mav()
@@ -5437,10 +5454,6 @@ Also, ignores heartbeats not from our target system'''
             self.verify_parameter_values({"COMPASS_ORIENT%d" % count: 0})
 
     def test_mag_calibration(self, compass_count=3, timeout=1000):
-        ex = None
-        self.set_parameter("AHRS_EKF_TYPE", 10)
-        self.set_parameter("SIM_GND_BEHAV", 0)
-
         def reset_pos_and_start_magcal(tmask):
             self.mavproxy.send("sitl_stop\n")
             self.mavproxy.send("sitl_attitude 0 0 0\n")
@@ -5724,7 +5737,12 @@ Also, ignores heartbeats not from our target system'''
             self.mavproxy_unload_module("relay")
             self.mavproxy_unload_module("sitl_calibration")
 
+        ex = None
+
         try:
+            self.set_parameter("AHRS_EKF_TYPE", 10)
+            self.set_parameter("SIM_GND_BEHAV", 0)
+
             curr_params = []
             target_mask = 0
             # we test all bitmask plus 0 for all
@@ -5748,6 +5766,10 @@ Also, ignores heartbeats not from our target system'''
         if ex is not None:
             raise ex
 
+        # need to reboot SITL after moving away from EKF type 10; we
+        # can end up with home set but origin not and that will lead
+        # to bad things.
+        self.reboot_sitl()
 
     def test_mag_reordering_assert_mag_transform(self, values, transforms):
         '''transforms ought to be read as, "take all the parameter values from
@@ -6024,7 +6046,7 @@ Also, ignores heartbeats not from our target system'''
                     last_status = now
                     self.mavproxy.send('dataflash_logger status\n')
                     # seen on autotest: Active Rate(3s):97.790kB/s Block:164 Missing:0 Fixed:0 Abandoned:0
-                    self.mavproxy.expect("Active Rate\([0-9]s\):([0-9]+[.][0-9]+)")
+                    self.mavproxy.expect("Active Rate\([0-9]+s\):([0-9]+[.][0-9]+)")
                     rate = float(self.mavproxy.match.group(1))
                     self.progress("Rate: %f" % rate)
                     if rate < 50:
